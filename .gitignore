@@ -1,0 +1,11 @@
+# Local logs and temporary files
+*.log
+tmp/
+runtime/
+
+# Editor and OS metadata
+.vscode/
+*.swp
+*~
+.DS_Store
+
