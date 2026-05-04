@@ -250,7 +250,7 @@ render_recent_tasks() {
     fi
 
     for file in "${files[@]}"; do
-        unset PROJECT JOB BRANCH STATUS START_EPOCH END_EPOCH STARTED_AT ENDED_AT CREATED_AT
+        unset PROJECT JOB BRANCH STATUS START_EPOCH END_EPOCH STARTED_AT ENDED_AT CREATED_AT RESULT_FILE
         load_env_file "$file"
         local duration="--:--:--"
         if [ -n "${START_EPOCH:-}" ] && [ -n "${END_EPOCH:-}" ]; then
@@ -262,6 +262,9 @@ render_recent_tasks() {
             "$duration" \
             "${STARTED_AT:-${CREATED_AT:-unknown}}" \
             "${ENDED_AT:-unknown}"
+        if [ "${PROJECT:-}" = "utility" ] && [ "${JOB:-}" = "repo_hash_check" ] && [ -n "${RESULT_FILE:-}" ] && [ -f "$RESULT_FILE" ]; then
+            sed 's/^/   /' "$RESULT_FILE"
+        fi
     done
 }
 
@@ -439,6 +442,28 @@ prompt_menu_choice() {
     printf '%s' "$choice"
 }
 
+is_exit_manager_choice() {
+    case "${1:-}" in
+        0|q|Q|quit|QUIT|exit|EXIT)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+exit_manager() {
+    echo
+    if has_running_tasks; then
+        echo "진행 중인 작업이 있습니다."
+        echo "작업은 tmux에서 계속 진행되며, 이 스크립트를 다시 실행하면 상태를 확인할 수 있습니다."
+    else
+        echo "Exit Manager"
+    fi
+    exit 0
+}
+
 prompt_dashboard_choice() {
     local prompt=$1
     local choice=""
@@ -470,7 +495,11 @@ select_commit_user() {
         echo "Select commit user"
         echo "1) Kai Han"
         echo "2) James Ahn"
+        echo "0) Exit Manager"
         user_sel="$(prompt_menu_choice "Choose: ")"
+        if is_exit_manager_choice "$user_sel"; then
+            exit_manager
+        fi
         case "$user_sel" in
             1)
                 COMMIT_USER_NAME="Kai Han"
@@ -1764,54 +1793,59 @@ run_release_note_task() {
 run_repo_hash_check_task() {
     require_commands git
 
-    echo "=========================================="
-    echo " Current Repository Hash Checker"
-    echo "=========================================="
-    echo
+    local result_file="$LOG_DIR/repo_hash_check_result.log"
+    set_kv_in_file "$(task_file_path "$TASK_ID")" "RESULT_FILE" "$result_file"
 
-    local tmp_log="$TASK_TMP_DIR/repo_hash_check.log"
-    local entry
-    for entry in "${REPO_HASH_TARGETS[@]}"; do
-        local disp repo_key check_branch repo_dir branch hash
-        IFS='|' read -r disp repo_key check_branch <<< "$entry"
-        repo_dir="$(repo_dir_for "$repo_key" "$check_branch")"
-
-        echo "[$disp]"
-        if [ ! -d "$repo_dir" ]; then
-            echo "  - 폴더 없음: $repo_dir"
-            echo
-            continue
-        fi
-
-        if [ ! -d "$repo_dir/.git" ]; then
-            echo "  - git repo 아님: $repo_dir"
-            echo
-            continue
-        fi
-
-        if [ -n "$check_branch" ]; then
-            branch="origin/$check_branch"
-            git -C "$repo_dir" fetch origin "+refs/heads/$check_branch:refs/remotes/origin/$check_branch" > "$tmp_log" 2>&1
-        else
-            branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-            git -C "$repo_dir" pull --ff-only > "$tmp_log" 2>&1
-        fi
-
-        if [ -s "$tmp_log" ]; then
-            echo "  - Update : $(tail -n 1 "$tmp_log")"
-        else
-            echo "  - Update : 완료"
-        fi
-
-        hash="$(git -C "$repo_dir" rev-parse "${branch:-HEAD}" 2>/dev/null || true)"
-        if [ -n "$hash" ]; then
-            echo "  - Branch : ${branch:-HEAD}"
-            echo "  - Hash   : $hash"
-        else
-            echo "  - git hash 조회 실패"
-        fi
+    {
+        echo "=========================================="
+        echo " Current Repository Hash Checker"
+        echo "=========================================="
         echo
-    done
+
+        local tmp_log="$TASK_TMP_DIR/repo_hash_check.log"
+        local entry
+        for entry in "${REPO_HASH_TARGETS[@]}"; do
+            local disp repo_key check_branch repo_dir branch hash
+            IFS='|' read -r disp repo_key check_branch <<< "$entry"
+            repo_dir="$(repo_dir_for "$repo_key" "$check_branch")"
+
+            echo "[$disp]"
+            if [ ! -d "$repo_dir" ]; then
+                echo "  - 폴더 없음: $repo_dir"
+                echo
+                continue
+            fi
+
+            if [ ! -d "$repo_dir/.git" ]; then
+                echo "  - git repo 아님: $repo_dir"
+                echo
+                continue
+            fi
+
+            if [ -n "$check_branch" ]; then
+                branch="origin/$check_branch"
+                git -C "$repo_dir" fetch origin "+refs/heads/$check_branch:refs/remotes/origin/$check_branch" > "$tmp_log" 2>&1
+            else
+                branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+                git -C "$repo_dir" pull --ff-only > "$tmp_log" 2>&1
+            fi
+
+            if [ -s "$tmp_log" ]; then
+                echo "  - Update : $(tail -n 1 "$tmp_log")"
+            else
+                echo "  - Update : Already up to date."
+            fi
+
+            hash="$(git -C "$repo_dir" rev-parse "${branch:-HEAD}" 2>/dev/null || true)"
+            if [ -n "$hash" ]; then
+                echo "  - Branch : ${branch:-HEAD}"
+                echo "  - Hash   : $hash"
+            else
+                echo "  - git hash 조회 실패"
+            fi
+            echo
+        done
+    } | tee "$result_file"
 }
 
 run_repo_clone_task() {
@@ -1934,9 +1968,15 @@ openwrt_menu() {
         echo "2) OpenWRT master build"
         echo "3) OpenWRT v1.00 build"
         echo "4) Back"
+        echo "0) Exit Manager"
         echo
 
-        case "$(prompt_dashboard_choice "Select: ")" in
+        local choice
+        choice="$(prompt_dashboard_choice "Select: ")"
+        if is_exit_manager_choice "$choice"; then
+            exit_manager
+        fi
+        case "$choice" in
             1)
                 openwrt_official_release_menu
                 ;;
@@ -1972,7 +2012,12 @@ openwrt_single_build_menu() {
     echo "Pkg Ver  : $pkg_version"
     echo
 
-    case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+    local choice
+    choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+    if is_exit_manager_choice "$choice"; then
+        exit_manager
+    fi
+    case "$choice" in
         1)
             launch_task "openwrt" "dirty_build" "$branch" "$repo_dir" \
                 "PKG_VERSION" "$pkg_version"
@@ -2011,7 +2056,12 @@ openwrt_official_release_menu() {
     echo "Message        : $commit_msg"
     echo
 
-    case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+    local choice
+    choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+    if is_exit_manager_choice "$choice"; then
+        exit_manager
+    fi
+    case "$choice" in
         1)
             launch_task "openwrt" "official_release" "multi" "" \
                 "PKG_VERSION" "$pkg_version" \
@@ -2033,9 +2083,15 @@ linuxos_menu() {
         echo "[LinuxOS]"
         echo "1) LinuxOS master build"
         echo "2) Back"
+        echo "0) Exit Manager"
         echo
 
-        case "$(prompt_dashboard_choice "Select: ")" in
+        local choice
+        choice="$(prompt_dashboard_choice "Select: ")"
+        if is_exit_manager_choice "$choice"; then
+            exit_manager
+        fi
+        case "$choice" in
             1)
                 local repo_dir
                 repo_dir="$(repo_dir_for linuxos master)"
@@ -2045,7 +2101,12 @@ linuxos_menu() {
                 echo "Branch   : master"
                 echo "Repo Dir : $repo_dir"
                 echo
-                case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+                local run_choice
+                run_choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+                if is_exit_manager_choice "$run_choice"; then
+                    exit_manager
+                fi
+                case "$run_choice" in
                     1)
                         launch_task "linuxos" "dirty_build" "master" "$repo_dir"
                         return 0
@@ -2072,9 +2133,15 @@ zephyros_menu() {
         echo "1) GDM7275x_nsa build"
         echo "2) GDM7275x_nsa build with PKGVER"
         echo "3) Back"
+        echo "0) Exit Manager"
         echo
 
-        case "$(prompt_dashboard_choice "Select: ")" in
+        local choice
+        choice="$(prompt_dashboard_choice "Select: ")"
+        if is_exit_manager_choice "$choice"; then
+            exit_manager
+        fi
+        case "$choice" in
             1)
                 local repo_dir
                 repo_dir="$(repo_dir_for Zephyros)"
@@ -2083,7 +2150,12 @@ zephyros_menu() {
                 echo "Task     : $(task_display_name zephyros gdm7275x_nsa_build default)"
                 echo "Repo Dir : $repo_dir"
                 echo
-                case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+                local run_choice
+                run_choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+                if is_exit_manager_choice "$run_choice"; then
+                    exit_manager
+                fi
+                case "$run_choice" in
                     1)
                         launch_task "zephyros" "gdm7275x_nsa_build" "default" "$repo_dir"
                         return 0
@@ -2102,7 +2174,12 @@ zephyros_menu() {
                 echo "Repo Dir : $repo_dir"
                 echo "PKG Ver  : $pkg_version"
                 echo
-                case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+                local run_choice
+                run_choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+                if is_exit_manager_choice "$run_choice"; then
+                    exit_manager
+                fi
+                case "$run_choice" in
                     1)
                         launch_task "zephyros" "gdm7275x_nsa_pkgver_build" "default" "$repo_dir" \
                             "PKG_VERSION" "$pkg_version"
@@ -2129,9 +2206,15 @@ release_note_menu() {
         echo "[Release Note]"
         echo "1) Generate From Date"
         echo "2) Back"
+        echo "0) Exit Manager"
         echo
 
-        case "$(prompt_dashboard_choice "Select: ")" in
+        local choice
+        choice="$(prompt_dashboard_choice "Select: ")"
+        if is_exit_manager_choice "$choice"; then
+            exit_manager
+        fi
+        case "$choice" in
             1)
                 local input_date
                 input_date="$(prompt_non_empty "기준 날짜 입력 (YYYY-MM-DD): ")"
@@ -2141,7 +2224,12 @@ release_note_menu() {
                 echo "Date    : $input_date"
                 echo "Log Dir : $LOG_ROOT/release_note/generate/default/<run_id>"
                 echo
-                case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+                local run_choice
+                run_choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+                if is_exit_manager_choice "$run_choice"; then
+                    exit_manager
+                fi
+                case "$run_choice" in
                     1)
                         launch_task "release_note" "generate" "default" "" \
                             "INPUT_DATE" "$input_date"
@@ -2173,9 +2261,13 @@ repository_clone_menu() {
             printf '%d) %s\n' "$((i + 1))" "$disp"
         done
         echo "$(( ${#REPOSITORY_CLONE_TARGETS[@]} + 1 ))) Back"
+        echo "0) Exit Manager"
         echo
 
         choice="$(prompt_dashboard_choice "Select: ")"
+        if is_exit_manager_choice "$choice"; then
+            exit_manager
+        fi
         case "$choice" in
             __REFRESH__)
                 ;;
@@ -2200,7 +2292,12 @@ repository_clone_menu() {
                         echo "Branch   : $repo_branch"
                     fi
                     echo
-                    case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+                    local run_choice
+                    run_choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+                    if is_exit_manager_choice "$run_choice"; then
+                        exit_manager
+                    fi
+                    case "$run_choice" in
                         1)
                             launch_task "utility" "repo_clone" "$repo_id" "$repo_dir" \
                                 "REPO_DISPLAY" "$disp" \
@@ -2225,14 +2322,25 @@ utility_menu() {
         echo "2) Repo Hash Check"
         echo "3) Show Workspace Paths"
         echo "4) Back"
+        echo "0) Exit Manager"
         echo
 
-        case "$(prompt_dashboard_choice "Select: ")" in
+        local choice
+        choice="$(prompt_dashboard_choice "Select: ")"
+        if is_exit_manager_choice "$choice"; then
+            exit_manager
+        fi
+        case "$choice" in
             1)
                 repository_clone_menu
                 ;;
             2)
-                case "$(prompt_menu_choice "1) Run  2) Cancel : ")" in
+                local run_choice
+                run_choice="$(prompt_menu_choice "1) Run  2) Cancel  0) Exit Manager : ")"
+                if is_exit_manager_choice "$run_choice"; then
+                    exit_manager
+                fi
+                case "$run_choice" in
                     1)
                         launch_task "utility" "repo_hash_check" "default" ""
                         return 0
@@ -2270,10 +2378,15 @@ main_menu() {
         echo "3) Zephyros"
         echo "4) Release Note"
         echo "5) Utility"
-        echo "6) Exit Manager"
+        echo "0) Exit Manager"
         echo
 
-        case "$(prompt_dashboard_choice "Select: ")" in
+        local choice
+        choice="$(prompt_dashboard_choice "Select: ")"
+        if is_exit_manager_choice "$choice"; then
+            exit_manager
+        fi
+        case "$choice" in
             1)
                 openwrt_menu
                 ;;
@@ -2288,19 +2401,6 @@ main_menu() {
                 ;;
             5)
                 utility_menu
-                ;;
-            6)
-                echo
-                echo "Running task가 있더라도 빌드는 계속 진행됩니다."
-                echo "Exit Manager는 메뉴만 종료합니다."
-                echo
-                case "$(prompt_menu_choice "1) Exit Manager  2) Cancel : ")" in
-                    1)
-                        exit 0
-                        ;;
-                    *)
-                        ;;
-                esac
                 ;;
             __REFRESH__)
                 ;;
