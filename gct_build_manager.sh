@@ -85,6 +85,31 @@ require_commands() {
     fi
 }
 
+remove_repo_dir() {
+    local repo_dir=$1
+    local resolved_repo_root resolved_repo_dir
+
+    if [ -z "$repo_dir" ] || [ "$repo_dir" = "/" ]; then
+        echo "❌ Refusing to remove unsafe repo path: ${repo_dir:-<empty>}"
+        return 1
+    fi
+
+    resolved_repo_root="$(readlink -m "$REPO_ROOT")"
+    resolved_repo_dir="$(readlink -m "$repo_dir")"
+
+    case "$resolved_repo_dir" in
+        "$resolved_repo_root"/*)
+            rm -rf "$resolved_repo_dir"
+            ;;
+        *)
+            echo "❌ Refusing to remove path outside repo root"
+            echo "   Repo root: $resolved_repo_root"
+            echo "   Target   : $resolved_repo_dir"
+            return 1
+            ;;
+    esac
+}
+
 write_env_pairs() {
     local file=$1
     shift
@@ -961,7 +986,7 @@ run_openwrt_release_core() {
 
     echo "[2] openwrt clean clone"
     echo "------------------------------------------"
-    rm -rf "$repo_dir"
+    remove_repo_dir "$repo_dir" || return 1
     git clone -b "$branch" --single-branch https://release.gctsemi.com/openwrt "$repo_dir"
 
     current_branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD)"
@@ -1026,7 +1051,7 @@ run_openwrt_release_core() {
     echo
     echo "[5] build용 openwrt clean clone"
     echo "------------------------------------------"
-    rm -rf "$repo_dir"
+    remove_repo_dir "$repo_dir" || return 1
     git clone -b "$branch" --single-branch https://release.gctsemi.com/openwrt "$repo_dir"
 
     current_branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD)"
@@ -1088,7 +1113,7 @@ run_zephyros_release_core() {
     echo "Log Dir  : $log_dir"
     echo
 
-    rm -rf "$repo_dir"
+    remove_repo_dir "$repo_dir" || return 1
     git clone https://jamesahn@vcs.gctsemi.com/OS/Zephyros "$repo_dir"
 
     build_start_epoch="$(date +%s)"
@@ -1135,7 +1160,7 @@ run_zephyros_nsa_task() {
     echo "Log Dir  : $log_dir"
     echo
 
-    rm -rf "$repo_dir"
+    remove_repo_dir "$repo_dir" || return 1
     git clone https://jamesahn@vcs.gctsemi.com/OS/Zephyros "$repo_dir"
 
     build_start_epoch="$(date +%s)"
@@ -1183,7 +1208,7 @@ run_zephyros_nsa_pkgver_task() {
     echo "PKG Ver  : $PKG_VERSION"
     echo
 
-    rm -rf "$repo_dir"
+    remove_repo_dir "$repo_dir" || return 1
     git clone https://jamesahn@vcs.gctsemi.com/OS/Zephyros "$repo_dir"
 
     build_start_epoch="$(date +%s)"
@@ -1529,7 +1554,7 @@ run_openwrt_task() {
 
     echo "[2] openwrt clean clone"
     echo "------------------------------------------"
-    rm -rf "$repo_dir"
+    remove_repo_dir "$repo_dir" || return 1
     git clone -b "$branch" --single-branch https://release.gctsemi.com/openwrt "$repo_dir"
 
     current_branch="$(git -C "$repo_dir" rev-parse --abbrev-ref HEAD)"
@@ -1677,7 +1702,7 @@ run_linuxos_task() {
     echo "------------------------------------------"
     if [ -d "$repo_dir" ]; then
         echo ">> 기존 '$repo_dir' 폴더가 발견되었습니다. 삭제를 진행합니다..."
-        rm -rf "$repo_dir"
+        remove_repo_dir "$repo_dir" || return 1
         echo ">> 삭제 완료."
     else
         echo ">> 기존 repo 없음."
@@ -1873,7 +1898,7 @@ run_repo_clone_task() {
 
     if [ -d "$repo_dir" ]; then
         echo ">> 기존 '$repo_dir' 폴더가 발견되었습니다. 삭제를 진행합니다..."
-        rm -rf "$repo_dir"
+        remove_repo_dir "$repo_dir" || return 1
         echo ">> 삭제 완료."
     else
         echo ">> 기존 repo 없음."
