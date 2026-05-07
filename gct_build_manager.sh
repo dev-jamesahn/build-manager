@@ -14,6 +14,14 @@ TASK_HISTORY_DIR="$RUNTIME_ROOT/history"
 TASK_CONFIG_DIR="$RUNTIME_ROOT/configs"
 AUTO_REFRESH_DEFAULT="${GCT_AUTO_REFRESH_DEFAULT:-1}"
 AUTO_REFRESH_INTERVAL="${GCT_AUTO_REFRESH_INTERVAL:-1}"
+DASHBOARD_REFRESH_CHOICE="__REFRESH__"
+LAST_RUNNING_TASKS_LINES=0
+RUNNING_TASKS_RENDERED_LINES=0
+RUNNING_TASKS_START_LINE=1
+RUNNING_TASK_NAMES=()
+RUNNING_TASK_STATUSES=()
+RUNNING_TASK_ELAPSED=()
+RUNNING_TASK_STARTED=()
 
 OPENWRT_REPOS=(
     "GDM|linuxos master|linuxos|master|https://release.gctsemi.com/linuxos"
@@ -66,9 +74,24 @@ pause_enter() {
 }
 
 clear_screen() {
-    if command -v clear >/dev/null 2>&1; then
-        clear
-    fi
+    # 전체 화면 초기화
+    printf "\033[H\033[J"
+}
+
+render_main_title() {
+    local rendered_lines=0
+    clear_screen
+    printf "==========================================\n"
+    rendered_lines=$((rendered_lines + 1))
+    printf " GCT Build Manager\n"
+    rendered_lines=$((rendered_lines + 1))
+    printf "==========================================\n"
+    rendered_lines=$((rendered_lines + 1))
+    printf "Workspace : %s\n" "$WORK_ROOT"
+    rendered_lines=$((rendered_lines + 1))
+    printf "\n"
+    rendered_lines=$((rendered_lines + 1))
+    RUNNING_TASKS_START_LINE=$((rendered_lines + 1))
 }
 
 require_commands() {
@@ -234,35 +257,84 @@ has_running_tasks() {
     return 1
 }
 
-render_running_tasks() {
+collect_running_tasks() {
     cleanup_stale_tasks
-    echo "[Running Tasks]"
-    local found=0
+
+    RUNNING_TASK_NAMES=()
+    RUNNING_TASK_STATUSES=()
+    RUNNING_TASK_ELAPSED=()
+    RUNNING_TASK_STARTED=()
+
+    local now_epoch
+    now_epoch="$(date +%s)"
     local file
     for file in "$TASK_DIR"/*.task; do
         [ -e "$file" ] || continue
-        unset TASK_ID PROJECT JOB BRANCH STATUS START_EPOCH CREATED_AT SESSION_NAME
+        unset TASK_ID PROJECT JOB BRANCH STATUS START_EPOCH CREATED_AT SESSION_NAME STARTED_AT
         load_env_file "$file"
         [ "${STATUS:-}" = "RUNNING" ] || continue
-        found=1
+
         local elapsed="--:--:--"
-        local base_epoch="${START_EPOCH:-}"
-        if [ -n "$base_epoch" ]; then
-            elapsed="$(format_duration "$(( $(date +%s) - base_epoch ))")"
+        if [ -n "${START_EPOCH:-}" ]; then
+            elapsed="$(format_duration "$(( now_epoch - START_EPOCH ))")"
         fi
-        printf ' - %s [%s] elapsed=%s start=%s\n' \
-            "$(task_display_name "${PROJECT:-unknown}" "${JOB:-unknown}" "${BRANCH:-default}")" \
-            "${STATUS:-unknown}" \
-            "$elapsed" \
-            "${STARTED_AT:-${CREATED_AT:-unknown}}"
+
+        RUNNING_TASK_NAMES+=("$(task_display_name "${PROJECT:-unknown}" "${JOB:-unknown}" "${BRANCH:-default}")")
+        RUNNING_TASK_STATUSES+=("${STATUS:-unknown}")
+        RUNNING_TASK_ELAPSED+=("$elapsed")
+        RUNNING_TASK_STARTED+=("${STARTED_AT:-${CREATED_AT:-unknown}}")
     done
-    if [ "$found" -eq 0 ]; then
-        echo " - none"
+
+    if [ "${#RUNNING_TASK_NAMES[@]}" -eq 0 ]; then
+        RUNNING_TASKS_RENDERED_LINES=2
+    else
+        RUNNING_TASKS_RENDERED_LINES=$(( ${#RUNNING_TASK_NAMES[@]} + 1 ))
     fi
 }
 
+running_tasks_line_count() {
+    collect_running_tasks
+    printf '%s' "$RUNNING_TASKS_RENDERED_LINES"
+}
+
+render_running_tasks_snapshot() {
+    printf "[Running Tasks]\033[K\n"
+    local i
+    for i in "${!RUNNING_TASK_NAMES[@]}"; do
+        printf ' - %s [%s] elapsed=%s start=%s\033[K\n' \
+            "${RUNNING_TASK_NAMES[$i]}" \
+            "${RUNNING_TASK_STATUSES[$i]}" \
+            "${RUNNING_TASK_ELAPSED[$i]}" \
+            "${RUNNING_TASK_STARTED[$i]}"
+    done
+    if [ "${#RUNNING_TASK_NAMES[@]}" -eq 0 ]; then
+        printf " - none\033[K\n"
+    fi
+}
+
+render_running_tasks() {
+    collect_running_tasks
+    render_running_tasks_snapshot
+}
+
+refresh_running_tasks() {
+    local current_lines
+    collect_running_tasks
+    current_lines="$RUNNING_TASKS_RENDERED_LINES"
+    if [ "$LAST_RUNNING_TASKS_LINES" -ne 0 ] && [ "$current_lines" -ne "$LAST_RUNNING_TASKS_LINES" ]; then
+        return 1
+    fi
+
+    {
+        printf "\033[s\033[%dH" "$RUNNING_TASKS_START_LINE"
+        render_running_tasks_snapshot
+        printf "\033[u"
+    } >&2
+    return 0
+}
+
 render_recent_tasks() {
-    echo "[Recent Tasks]"
+    printf "[Recent Tasks]\033[K\n"
     local files=()
     local file
     while IFS= read -r file; do
@@ -270,7 +342,7 @@ render_recent_tasks() {
     done < <(find "$TASK_HISTORY_DIR" -maxdepth 1 -type f -name '*.task' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -n 5 | awk '{print $2}')
 
     if [ "${#files[@]}" -eq 0 ]; then
-        echo " - none"
+        printf " - none\033[K\n"
         return
     fi
 
@@ -281,14 +353,14 @@ render_recent_tasks() {
         if [ -n "${START_EPOCH:-}" ] && [ -n "${END_EPOCH:-}" ]; then
             duration="$(format_duration "$(( END_EPOCH - START_EPOCH ))")"
         fi
-        printf ' - %s [%s] duration=%s start=%s end=%s\n' \
+        printf ' - %s [%s] duration=%s start=%s end=%s\033[K\n' \
             "$(task_display_name "${PROJECT:-unknown}" "${JOB:-unknown}" "${BRANCH:-default}")" \
             "${STATUS:-unknown}" \
             "$duration" \
             "${STARTED_AT:-${CREATED_AT:-unknown}}" \
             "${ENDED_AT:-unknown}"
         if [ "${PROJECT:-}" = "utility" ] && [ "${JOB:-}" = "repo_hash_check" ] && [ -n "${RESULT_FILE:-}" ] && [ -f "$RESULT_FILE" ]; then
-            sed 's/^/   /' "$RESULT_FILE"
+            sed 's/^/   /;s/$/\x1b[K/' "$RESULT_FILE"
         fi
     done
 }
@@ -448,16 +520,20 @@ task_slug_name() {
 }
 
 print_main_header() {
-    clear_screen
-    echo "=========================================="
-    echo " GCT Build Manager"
-    echo "=========================================="
-    echo "Workspace : $WORK_ROOT"
-    echo
-    render_running_tasks
-    echo
-    render_recent_tasks
-    echo
+    local is_refresh="${1:-0}"
+    if [ "$is_refresh" -eq 1 ]; then
+        # [리프레시 모드]
+        # 모든 UI 출력물은 표준 에러(>&2)로 보내어 $(...) 캡처에 걸리지 않게 합니다.
+        refresh_running_tasks
+    else
+        # [일반 모드] 전체 화면을 지우고 처음부터 다시 그립니다.
+        render_main_title
+        render_running_tasks
+        LAST_RUNNING_TASKS_LINES="$RUNNING_TASKS_RENDERED_LINES"
+        printf "\n"
+        render_recent_tasks
+        printf "\n"
+    fi
 }
 
 prompt_menu_choice() {
@@ -493,16 +569,31 @@ prompt_dashboard_choice() {
     local prompt=$1
     local choice=""
 
-    if [ "${AUTO_REFRESH_DEFAULT:-1}" = "1" ] && has_running_tasks; then
-        if read -r -t "${AUTO_REFRESH_INTERVAL:-1}" -p "$prompt" choice; then
-            printf '%s' "$choice"
+    # 프롬프트 출력을 표준 에러(>&2)로 리다이렉션하여 화면에만 보이고 캡처는 방지합니다.
+    printf "%s" "$prompt" >&2
+    while true; do
+        if [ "${AUTO_REFRESH_DEFAULT:-1}" = "1" ] && has_running_tasks; then
+            if read -r -t "${AUTO_REFRESH_INTERVAL:-1}" choice; then
+                printf '%s' "$choice" # 사용자가 입력한 값만 stdout으로 출력 (캡처됨)
+                return 0
+            else
+                if ! print_main_header 1; then
+                    printf '%s' "$DASHBOARD_REFRESH_CHOICE"
+                    return 0
+                fi
+                continue
+            fi
         else
-            printf '__REFRESH__'
+            if [ "$LAST_RUNNING_TASKS_LINES" -ne 0 ] && [ "$(running_tasks_line_count)" -ne "$LAST_RUNNING_TASKS_LINES" ]; then
+                printf '%s' "$DASHBOARD_REFRESH_CHOICE"
+                return 0
+            fi
+            if read -r choice; then
+                printf '%s' "$choice"
+            fi
+            return 0
         fi
-        return 0
-    fi
-
-    prompt_menu_choice "$prompt"
+    done
 }
 
 prompt_non_empty() {
@@ -2014,8 +2105,6 @@ openwrt_menu() {
             4)
                 return 0
                 ;;
-            __REFRESH__)
-                ;;
             *)
                 ;;
         esac
@@ -2143,8 +2232,6 @@ linuxos_menu() {
             2)
                 return 0
                 ;;
-            __REFRESH__)
-                ;;
             *)
                 ;;
         esac
@@ -2217,8 +2304,6 @@ zephyros_menu() {
             3)
                 return 0
                 ;;
-            __REFRESH__)
-                ;;
             *)
                 ;;
         esac
@@ -2267,8 +2352,6 @@ release_note_menu() {
             2)
                 return 0
                 ;;
-            __REFRESH__)
-                ;;
             *)
                 ;;
         esac
@@ -2294,8 +2377,6 @@ repository_clone_menu() {
             exit_manager
         fi
         case "$choice" in
-            __REFRESH__)
-                ;;
             *)
                 if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
                     continue
@@ -2386,8 +2467,6 @@ utility_menu() {
             4)
                 return 0
                 ;;
-            __REFRESH__)
-                ;;
             *)
                 ;;
         esac
@@ -2426,8 +2505,6 @@ main_menu() {
                 ;;
             5)
                 utility_menu
-                ;;
-            __REFRESH__)
                 ;;
             *)
                 ;;
